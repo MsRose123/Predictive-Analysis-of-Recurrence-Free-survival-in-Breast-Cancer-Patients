@@ -1,0 +1,549 @@
+---
+title: "R code"
+author: 'StduentNo : 2332635'
+date: "2023-04-18"
+---
+
+```{r , include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list=ls())
+
+Sys.Date()
+dir <- getwd()
+setwd(dir)
+```
+
+```{r setup, include=FALSE}
+# Required packages and libraries
+install.packages('tinytex')
+install.packages("knitr")
+install.packages("naniar")
+
+
+#tinytex::tlmgr_install('multirow')
+#tinytex::reinstall_tinytex(repository = "illinois")
+
+```
+
+```{r}
+library(tinytex)
+library(knitr)
+library(kableExtra)
+library(haven)
+library(VIM)
+library(gtsummary)
+library(tidyverse)
+library(naniar)
+library(dplyr)
+library(mice)
+library(survival)
+library(lmtest)
+library(survminer)
+```
+
+
+
+```{r}
+# read data
+dat <- readRDS("assessment.rds")
+
+# inspect the data
+head(dat)
+summary(dat)
+```
+
+```{r}
+# pre-processing data
+
+dat0 <- dat %>% transmute(
+  id = as.numeric(id),
+  hormon = as.factor(hormon),
+  age = as.numeric(age),
+  menostatus = as.factor(menostatus),
+  tsize = as.numeric(tsize),
+  tgrade = as.factor(tgrade),
+  posnodes = as.numeric(posnodes),
+  progrec = as.numeric(progrec),
+  estrec = as.numeric(estrec),
+  rectime = as.numeric(rectime),
+  recyear = as.numeric(recyear),
+  censrec = as.numeric(censrec),
+  x4a = as.factor(x4a),
+  x4b = as.factor(x4b),
+  x5e = as.numeric(x5e)
+)
+
+head(dat0)
+
+class(dat0$hormon)
+```
+
+```{r}
+# investigating the presence of missing data
+missing_dat0 <- sapply(dat0, function(x) sum(is.na(x)))
+missing_dat0
+
+
+
+
+# missingness
+dat0 %>%
+tbl_summary(missing = "ifany", missing_text = "Missing")
+
+
+```
+
+```{r}
+# explore patterns of missingness in the data
+
+# examine missingness at induvidal participant level
+vis_miss(dat0)
+miss_var_summary(dat0)
+
+# examine missingness patterns per covariates and accross covariates with missing values
+# excluded unique identifier, id
+missplot_all <- aggr(
+dat0[, c(
+  "hormon",
+  "age",
+  "rectime",
+  "recyear",
+  "censrec"
+)],
+prop = FALSE, numbers = TRUE, sortCombs = TRUE,
+cex.axis = 0.75, cex.numbers = 0.75
+)
+
+```
+
+```{r}
+# further exploration of missingness
+
+# no of complete cases
+misscount <- numeric(nrow(dat0))
+for (i in 1:nrow(dat0)) {
+misscount[i] <- countNA(dat0[i, c(
+  "id",
+  "hormon",
+  "age",
+  "menostatus",
+  "tsize",
+  "tgrade",
+  "posnodes",
+  "progrec",
+  "estrec",
+  "rectime",
+  "recyear",
+  "censrec",
+  "x4a",
+  "x4b",
+  "x5e"
+)])
+}
+
+table(misscount)
+```
+
+# no of complete cases : 168
+
+```{r}
+round(table(misscount) / sum(table(misscount)) * 100, 2)
+```
+
+```{r}
+# checking associations between missing data and observed data
+
+indic_comp <- rep(0, nrow(dat0))
+indic_comp[which(misscount == 0)] <- 1
+dat0$indic_comp <- indic_comp
+assoc_comp <- glm(
+indic_comp ~ hormon + age + menostatus + tsize + tgrade + posnodes + progrec + estrec  + x4a + x4b + x5e,
+data = dat0, family = binomial)
+
+summary(assoc_comp)
+
+# do not include outcome variables, rectime, recyear, censrec for convergence
+
+# result : tsize is find to be associated with the mnissingness. And give the statistical interpretation.
+
+exp(coef(assoc_comp))
+```
+
+
+```{r}
+# updated datset after dropping id and rectime
+
+dat1 <- dat0 %>% dplyr::select(hormon, age, menostatus, tsize, tgrade, posnodes, progrec, estrec, x4a, x4b, x5e, recyear, censrec)
+
+head(dat1)
+
+```
+
+
+
+```{r}
+# model 1
+# cox model on the initial data(data with misingness) with all covariates 
+# censrec - event of interest
+# recyear - time of event
+model_cox <- coxph(Surv(recyear, censrec) ~ hormon + age + menostatus + tsize + tgrade + posnodes + progrec + estrec + x4a + x4b + x5e, data = dat1)
+
+summary(model_cox, exponentiate = TRUE, conf.int = 0.95)
+```
+
+
+```{r}
+# Multiple imputation
+
+# cumulative baseline hazard - converting linear time to a function of time to go with substantive model assumptions
+
+dat1$cumhzd <-
+  nelsonaalen(dat1, recyear, censrec)
+
+head(dat1)
+# nelsonaalen is not dependent on cox hazard model
+
+
+# plot for cumulative hazard function
+plot(x = dat1$recyear, y = dat1$cumhzd, ylab = "Cumulative hazard", xlab = "Time")
+
+```
+
+```{r}
+# imputing
+
+
+# data for imputation
+dat_imp_incomplete <- dat1 %>% 
+  dplyr::select(cumhzd, hormon, age, menostatus, tsize, tgrade, posnodes, progrec, estrec, censrec, x4a, x4b, x5e)
+
+# conduct a dryun of mice with default settings
+dryrun <- mice(dat_imp_incomplete[,c("cumhzd", "hormon", "age", "menostatus", "tsize", "tgrade", "posnodes", "progrec", "estrec", "censrec", "x4a", "x4b", "x5e")],
+               maxit = 0, seed = 987)
+
+dryrun
+# explain why dryrun is conducted
+
+```
+
+```{r}
+# change the predictor matrix
+pred <- dryrun$pred
+
+
+# set the rows of the fully observed variables to 0 - this to avoid predicting the already complete variales, thus to avoid unwanted processing time
+pred["tsize",] <- 0
+pred["menostatus",] <- 0
+pred["tgrade",] <- 0
+pred["posnodes",] <- 0
+pred["progrec",] <- 0
+pred["estrec",] <- 0
+pred["x4a",] <- 0
+pred["x4b",] <- 0
+pred["x5e",] <- 0
+
+pred
+```
+
+```{r}
+# save method
+method <- dryrun$method
+method
+```
+
+
+```{r}
+# calculate the number of imputations, m
+# calculation for m
+
+# Proportion of complete cases
+mean(cci(dat1))
+# Proportion of cases with any missing value
+p <- mean(ici(dat1))
+
+m <- round(100*p)
+m
+
+# Proportion of cases with missing values for each variable
+
+# average over cases with missing data for each variable and then taking the highest average value available. Multiplying this with 100 and rounding off
+P <- sapply(dat1, function(x) mean(is.na(x)))
+P
+
+m <- max(5, round(100*p))
+m
+
+```
+
+```{r}
+# impute the data
+dat_imp <- mice(
+  dat_imp_incomplete[, c("cumhzd", "hormon", "age", "menostatus", "tsize", "tgrade", "posnodes", "progrec", "estrec", "censrec", "x4a", "x4b", "x5e")],
+  method = method,
+  pred = pred,
+  m = m,
+  maxit = 10,
+  seed = 987
+)
+
+```
+
+```{r}
+# Imputed datasets in long form
+completedData <- complete(dat_imp, "long", include = TRUE)
+
+# Replacing missing values in recyear with imputed values from cumhzd
+
+# Repeat time variable m + 1 times
+# includes the original data as well as m imputations
+completedData$recyear <- rep(dat1$recyear, dat_imp$m + 1)
+
+
+# Replace missing recyear values with corresponding imputed cumulative hazard value, cumhzd
+
+#  .imp > 0 prevents replacing missing values in the original data
+
+sub_data <- completedData$.imp > 0 & is.na(completedData$recyear)
+if(sum(sub_data) > 0) {
+  
+  # Create a look-up table with the event times and corresponding cumulative hazards
+  look_up <- data.frame(time   = dat1$recyear,
+                        cumhzd = dat1$cumhzd)
+  
+  # Sort and remove duplicates
+  look_up <- look_up[order(look_up$time),]
+  look_up <- look_up[!duplicated(look_up) & !is.na(look_up$time),]
+  
+  for(i in 1:sum(sub_data)) {
+    # Use max since last 2 times have the same cumhaz
+    completedData$recyear[sub_data][i] <-
+      max(look_up$time[look_up$cumhzd == completedData$cumhzd[sub_data][i]], na.rm = T)
+  }
+}
+
+# Convert back to a mids object
+completedData <- as.mids(completedData)
+
+
+#completedData$imp[[1]]
+
+```
+
+# completedData contains all the completed data for m number of imputations, ie, m datasets
+
+```{r}
+# stripplot
+# examine the imputed dataset using plots
+# hormon - factor
+stripplot(completedData, hormon ~ .imp,
+          col = c("gray", "black"),
+          pch = c(21, 20),
+          cex = c(1, 1.5))
+# age - continuous
+stripplot(completedData, age ~ .imp,
+          col = c("gray", "black"),
+          pch = c(21, 20),
+          cex = c(1, 1.5))
+
+# recyear - continuous
+stripplot(completedData, recyear ~ .imp,
+          col = c("gray", "black"),
+          pch = c(21, 20),
+          cex = c(1, 1.5))
+# censrec - continuous
+stripplot(completedData, censrec ~ .imp,
+          col = c("gray", "black"),
+          pch = c(21, 20),
+          cex = c(1, 1.5))
+```
+
+```{r}
+# bwplot
+# if the no of missing values is large, stirpplot may not be very informative as the imputed values are plotted on top of observed values.
+# use bwplot()
+
+# hormon - factor
+bwplot(completedData, hormon ~ .imp)
+# age - continuous
+bwplot(completedData, age ~ .imp)
+# recyear - continuous
+bwplot(completedData, recyear ~ .imp)
+# censrec - continuous
+bwplot(completedData, censrec ~ .imp)
+
+
+```
+
+
+```{r}
+# model 2
+# make a model with all the covariates in the imputed data.
+model_cox2 <- with(completedData,coxph(Surv(recyear, censrec) ~ hormon + age + menostatus + tsize + tgrade + posnodes + progrec + estrec + x4a + x4b + x5e))
+
+summary(pool(model_cox2), exponentiate = TRUE, conf.int = 0.95)
+
+```
+
+```{r}
+# variable selection using backward elimination
+
+library(MASS)
+
+# variable selection
+selected_vars <- lapply(1:m, function(i) {
+  dataset <- complete(completedData, i)
+
+  # Full model with all covariates
+  full_model <- coxph(Surv(recyear, censrec) ~ hormon + age + menostatus + tsize + tgrade + posnodes + progrec + estrec + x4a + x4b + x5e, data = dataset)
+  
+  # Backward elimination using AIC
+  step_result <- stepAIC(full_model, direction = "backward", trace = FALSE)
+  vars <- names(coef(step_result))
+  
+  return(vars)
+})
+
+# Count the frequency of each variable being selected
+var_freq <- table(unlist(selected_vars))
+var_freq
+
+# the variables that were consistently selected
+# adjusted this threshold to >= m/2
+
+selected_covariates <- names(var_freq[var_freq >= (m / 2)]) 
+selected_covariates
+
+
+
+```
+
+```{r}
+# model 3
+# cox model with selected covariates
+
+model_cox_fit <- with(completedData,
+                coxph(Surv(recyear, censrec) ~ hormon + menostatus + tsize + tgrade + posnodes + progrec + x5e))
+
+# odds ratio scale - exponentiate
+cox_model_pool <- summary(pool(model_cox_fit), exponentiate = TRUE, conf.int = 0.95)
+cox_model_pool
+
+# log-odds ratio scale
+summary(pool(model_cox_fit))
+
+```
+
+```{r}
+# model 4
+# Further refining the model - After imputation, the same set of variables showed statistical significance for model 2 (with all covariates) and models 3 (with selected covariates), we decided to refine the model further with only the significant covariates.
+
+model_cox4 <- with(completedData,
+                coxph(Surv(recyear, censrec) ~ hormon + tsize + tgrade + progrec + x5e))
+
+# odds ratio scale - exponentiate
+summary(pool(model_cox4), exponentiate = TRUE, conf.int = 0.95)
+
+```
+
+
+# Model diagnostics and validation
+```{r}
+# include in methods and results
+
+# proportional hazards assumption
+
+
+
+# Function to perform cox.zph() on each imputed dataset
+ph_test_each_imputed <- function(model_cox4) {
+  ph_test <- cox.zph(model_cox4)
+  
+  return(ph_test)
+}
+
+# Apply the function to the list of fitted cox models
+ph_tests <- lapply(model_cox4$analyses, ph_test_each_imputed)
+
+# function to check how many imputations have proportional hazards assumption true.
+flag <- FALSE 
+a<-function(ph_tests){
+  each <- ph_tests$table
+  if(each[6,3]<0.05)
+    flag <- TRUE
+  return(flag)
+}
+
+signif_test <- lapply(ph_tests, a)
+
+count_true <- sum(sapply(signif_test, function(x) sum(x == FALSE)))
+count_true
+
+# p-value for GLOBAL variable not < 0.05 implies, no statistical significance. Thus validating proportional hazard assumption.
+
+# Here, only 45 of the 76 imputations shows support towards proportional hazards assumption.
+# This is based on the GLOBAL value. A statistically significant global value indiactes that atlest one of the variables in the model violates proportional hazard assumption.
+# In all the 76 imputations , hormon representing hormonal therapy is seen to follow PH assumption.
+# Check the induvidal p-values for the varaiables to assess which all variables violate proportional hazard assumption.
+
+# plot ph_tests
+# ph_test pooled
+ggcoxzph(ph_tests[[1]])
+
+# Plot the Schoenfeld residuals for each imputed dataset
+for (i in seq_along(ph_tests)) {
+  plot_residuals(ph_tests[[i]], i)
+}
+
+# Model diagnostics and validation for cox model
+model_cox4 %>% gtsummary::tbl_regression(exp = TRUE)
+
+# percentage of models with valid PH assumption
+(45/76)*100
+76-45
+(count_true/length(signif_test))*100
+
+#almost 60% of the imputed models lend support to PH assumption
+```
+
+
+
+```{r}
+# predictions using cox model
+
+# Function to fit Cox model and make predictions
+fit_and_predict <- function(data) {
+  # Fit the Cox model using the selected variables
+  cox_model <- coxph(Surv(recyear, censrec) ~ hormon + tsize + tgrade + progrec + x5e, data = data)
+  
+  # Make predictions
+  pred_surv <- survfit(cox_model, newdata = data)
+  return(pred_surv)
+}
+
+# Fit the Cox model and make predictions for each imputed dataset
+predictions_list <- lapply(1:m, function(i) {
+  dataset <- complete(completedData, i)
+  predictions <- fit_and_predict(dataset)
+  return(predictions)
+})
+
+
+# Compute the average of the predicted survival probabilities
+avg_predictions <- predictions_list[[1]]$surv
+for (i in 2:m) {
+  avg_predictions <- avg_predictions + predictions_list[[i]]$surv
+}
+avg_predictions <- avg_predictions / m
+
+# Create a new survfit object to store the average predictions
+avg_pred_survfit <- predictions_list[[1]]
+avg_pred_survfit$surv <- avg_predictions
+
+# Plot the average predictions
+plot(avg_pred_survfit, main = "Predicted Survival Probabilities (Averaged)")
+```
+
+
