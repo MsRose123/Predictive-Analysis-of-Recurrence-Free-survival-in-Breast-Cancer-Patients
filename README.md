@@ -33,12 +33,8 @@ Dataset Variables :
 | x4b       | Indicator of tumour grade = 3                        |
 | x5e       | Transformation of number of positive nodes, exp(−0.12 × posnodes) |
 
-Directory Structure:
---------------------
-
 Git Version controlled :
 ------------------------
-
 
 The following commands are used to version control using git :
 (given git is already installed)
